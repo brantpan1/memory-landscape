@@ -5,14 +5,23 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { journeyData } from '@/lib/journeyData'
 import { mapJourneyToFeatures, MappedLocation } from '@/lib/featureMapping'
-import { TerrainEngine } from '@/lib/terrainEngine'
+import { PointCloudSphere } from '@/lib/pointCloudSphere'
+import { DataCardSystem } from '@/lib/dataCardSystem'
+import { createPostProcessing, PostProcessingSetup } from '@/lib/postProcessing'
 import MemoryHUD from './MemoryHUD'
 
 export default function TopographyScene() {
   const mountRef = useRef<HTMLDivElement>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
+
   const [selected, setSelected] = useState<MappedLocation | undefined>(
     undefined,
+  )
+  const [hovered, setHovered] = useState<MappedLocation | null>(null)
+
+  // optional: for sizing the div (keep if you already had this logic)
+  const [height, setHeight] = useState<number>(
+    typeof window !== 'undefined' ? window.innerHeight : 800,
   )
 
   useEffect(() => {
@@ -23,238 +32,323 @@ export default function TopographyScene() {
     const rect = mountRef.current.getBoundingClientRect()
     const W = rect.width || window.innerWidth
     const H = rect.height || window.innerHeight
+    setHeight(H)
 
-    const scene = new THREE.Scene()
-    scene.fog = new THREE.FogExp2(0x000511, 0.0016)
-
-    const camera = new THREE.PerspectiveCamera(60, W / H, 0.1, 1500)
-    camera.position.set(160, 150, 160)
-
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
+    // renderer
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: false,
+      powerPreference: 'high-performance',
+    })
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.setSize(W, H)
-    renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
-    renderer.setClearColor(0x000000, 1)
-    mountRef.current.appendChild(renderer.domElement)
+    renderer.toneMapping = THREE.ACESFilmicToneMapping
+    renderer.toneMappingExposure = 0.75
     rendererRef.current = renderer
+    mountRef.current.appendChild(renderer.domElement)
 
-    // lights
-    scene.add(new THREE.AmbientLight(0x8899bb, 0.65))
-    const sun = new THREE.DirectionalLight(0xfff5e6, 0.95)
-    sun.position.set(130, 160, 110)
-    sun.castShadow = true
-    sun.shadow.mapSize.set(1024, 1024)
-    scene.add(sun)
-    const rim = new THREE.DirectionalLight(0x4fc3f7, 0.35)
-    rim.position.set(-120, 90, -80)
-    scene.add(rim)
+    // scene & camera
+    const scene = new THREE.Scene()
+    scene.background = new THREE.Color(0x020208)
+
+    const camera = new THREE.PerspectiveCamera(50, W / H, 0.1, 2000)
+    camera.position.set(210, 110, 210)
+
+    // lighting – toned down
+    const ambient = new THREE.AmbientLight(0xffffff, 0.12)
+    scene.add(ambient)
+
+    const keyLight = new THREE.DirectionalLight(0xffffff, 0.32)
+    keyLight.position.set(120, 180, 140)
+    scene.add(keyLight)
 
     // controls
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
-    controls.dampingFactor = 0.07
-    controls.enablePan = false
-    controls.minDistance = 90
-    controls.maxDistance = 420
-    controls.maxPolarAngle = Math.PI * 0.49
+    controls.dampingFactor = 0.05
+    controls.enablePan = true
+    controls.minDistance = 110
+    controls.maxDistance = 450
+    controls.target.set(0, 10, 0)
+    controls.autoRotate = false
+    controls.autoRotateSpeed = 0
 
-    // data → features
+    // data
     const features = mapJourneyToFeatures(journeyData)
 
-    // terrain
-    const engine = new TerrainEngine(101)
-    const terrain = engine.generate(features)
-    scene.add(terrain)
+    // point cloud sphere
+    const sphereEngine = new PointCloudSphere()
+    const pointCloud = sphereEngine.generate(features)
+    scene.add(pointCloud)
 
-    // center/look
-    const bb = new THREE.Box3().setFromObject(terrain)
-    const center = bb.getCenter(new THREE.Vector3())
-    controls.target.copy(center)
-    camera.lookAt(center)
+    // cards
+    const cardSystem = new DataCardSystem(
+      features,
+      sphereEngine,
+      journeyData.locations,
+    )
+    scene.add(cardSystem.getCardGroup())
+    scene.add(cardSystem.getWireGroup())
+    scene.add(cardSystem.getInterCardWireGroup())
 
-    // halos
-    const haloGroup = new THREE.Group()
-    features.mapped.forEach((m) => {
-      const g = new THREE.SphereGeometry(m.isVisit ? 16 : 22, 16, 16)
-      const mat = new THREE.MeshBasicMaterial({
-        color: m.baseColor,
-        transparent: true,
-        opacity: m.haloOpacity,
-        side: THREE.BackSide,
-        depthWrite: false,
-      })
-      const mesh = new THREE.Mesh(g, mat)
-      mesh.position.set(m.pos.x, Math.max(6, m.elevationBias * 0.22), m.pos.z)
-      haloGroup.add(mesh)
+    // ambient particles
+    const ambientParticleCount = 800
+    const ambientPositions = new Float32Array(ambientParticleCount * 3)
+    for (let i = 0; i < ambientParticleCount; i++) {
+      const theta = Math.random() * Math.PI * 2
+      const phi = Math.acos(2 * Math.random() - 1)
+      const r = 100 + Math.random() * 150
+      ambientPositions[i * 3 + 0] = r * Math.sin(phi) * Math.cos(theta)
+      ambientPositions[i * 3 + 1] = r * Math.cos(phi)
+      ambientPositions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta)
+    }
+    const ambientGeo = new THREE.BufferGeometry()
+    ambientGeo.setAttribute(
+      'position',
+      new THREE.BufferAttribute(ambientPositions, 3),
+    )
+    const ambientMat = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size: 0.6,
+      transparent: true,
+      opacity: 0.15,
+      depthWrite: false,
     })
-    scene.add(haloGroup)
+    const ambientPoints = new THREE.Points(ambientGeo, ambientMat)
+    scene.add(ambientPoints)
 
-    // labels (sprites)
-    const labelGroup = new THREE.Group()
-    features.mapped.forEach((m) => {
-      const canvas = document.createElement('canvas')
-      canvas.width = 512
-      canvas.height = 256
-      const ctx = canvas.getContext('2d')
-      if (!ctx) return
+    // post-processing
+    let postProcessing: PostProcessingSetup | null = null
+    try {
+      postProcessing = createPostProcessing(renderer, scene, camera)
+    } catch (e) {
+      console.warn('Post-processing not available:', e)
+    }
 
-      const loc = journeyData.locations.find((l) => l.id === m.id)!
-      ctx.clearRect(0, 0, 512, 256)
-      ctx.fillStyle = 'rgba(255,255,255,0.95)'
-      ctx.font =
-        'bold 56px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif'
-      ctx.textAlign = 'center'
-      ctx.fillText(loc.name, 256, 110)
+    // ---------- HOVER / RAYCAST SETUP (step 2) ----------
 
-      if (loc.nameCn) {
-        ctx.fillStyle = 'rgba(255,255,255,0.65)'
-        ctx.font =
-          '40px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif'
-        ctx.fillText(loc.nameCn, 256, 158)
-      }
-
-      // show period succinctly if available
-      const subtitle = loc.period
-        ? `${loc.period.start.slice(0, 4)}${loc.period.end ? '–' + loc.period.end.slice(0, 4) : ''}`
-        : (loc.year ?? '')
-      ctx.fillStyle = 'rgba(255,255,255,0.45)'
-      ctx.font =
-        '32px -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif'
-      ctx.fillText(String(subtitle), 256, 205)
-
-      const tex = new THREE.CanvasTexture(canvas)
-      const sm = new THREE.SpriteMaterial({
-        map: tex,
-        transparent: true,
-        opacity: m.labelOpacity,
-        depthWrite: false,
-      })
-      const sprite = new THREE.Sprite(sm)
-      sprite.position.set(m.pos.x, 20, m.pos.z)
-      sprite.scale.set(m.labelScale, m.labelScale * 0.5, 1)
-      ;(sprite as any).__mapped = m
-      labelGroup.add(sprite)
-    })
-    scene.add(labelGroup)
-
-    // arcs
-    const pathGroup = new THREE.Group()
-    features.mappedConnections.forEach((c) => {
-      const A = c.from.pos.clone().setY(0.6)
-      const B = c.to.pos.clone().setY(0.6)
-      const M = A.clone().add(B).multiplyScalar(0.5)
-      M.y = c.curvatureY
-
-      const curve = new THREE.CatmullRomCurve3([A, M, B])
-      const pts = curve.getPoints(120)
-      const geo = new THREE.BufferGeometry().setFromPoints(pts)
-      const mat = new THREE.LineBasicMaterial({
-        color: c.color,
-        transparent: true,
-        opacity: c.opacity,
-      })
-      const line = new THREE.Line(geo, mat)
-      line.position.y = 0.8 + c.weight * 0.7
-      pathGroup.add(line)
-
-      // light “thickness” copies
-      const copies = Math.round(c.weight * 5)
-      for (let i = 0; i < copies; i++) {
-        const off = (i + 1) * 0.03
-        const g2 = new THREE.BufferGeometry().setFromPoints(
-          pts.map((p) => p.clone().add(new THREE.Vector3(off, 0, 0))),
-        )
-        const l2 = new THREE.Line(g2, mat.clone())
-        ;(l2.material as THREE.LineBasicMaterial).opacity = c.opacity * 0.65
-        l2.position.y = line.position.y
-        pathGroup.add(l2)
-      }
-    })
-    scene.add(pathGroup)
-
-    // picking
     const raycaster = new THREE.Raycaster()
+    raycaster.params.Points = { threshold: 5 }
+
     const mouse = new THREE.Vector2()
-    const onPointerDown = (ev: PointerEvent) => {
+    let mouseWorld: THREE.Vector3 | null = null
+    let hoverDirty = false
+    let lastHoveredId: string | null = null
+    let isRunning = true
+
+    const onPointerMove = (ev: PointerEvent) => {
       const bounds = renderer.domElement.getBoundingClientRect()
       mouse.x = ((ev.clientX - bounds.left) / bounds.width) * 2 - 1
       mouse.y = -(((ev.clientY - bounds.top) / bounds.height) * 2 - 1)
-      raycaster.setFromCamera(mouse, camera)
-      const hits = raycaster.intersectObjects(labelGroup.children, false)
-      if (hits[0]) {
-        const sp = hits[0].object as any
-        const mapped: MappedLocation | undefined = sp.__mapped
-        setSelected(mapped)
+      hoverDirty = true
+    }
+
+    const onPointerDown = () => {
+      if (!lastHoveredId) return
+      const cards = cardSystem.getCards()
+      const card = cards.find((c) => c.mapped.id === lastHoveredId)
+      if (card) {
+        setSelected(card.mapped)
       }
     }
+
+    renderer.domElement.addEventListener('pointermove', onPointerMove, {
+      passive: true,
+    })
     renderer.domElement.addEventListener('pointerdown', onPointerDown, {
       passive: true,
     })
 
-    // animate
+    // ---------- ANIMATION LOOP ----------
+
     let raf = 0
+    const clock = new THREE.Clock()
+    let lastTime = 0
+
     const animate = () => {
+      if (!isRunning) return
       raf = requestAnimationFrame(animate)
-      // subtle breathe
-      terrain.rotation.y = Math.sin(performance.now() * 0.00045) * 0.012
+
+      const elapsed = clock.getElapsedTime()
+      const deltaTime = Math.min(elapsed - lastTime, 0.1)
+      lastTime = elapsed
+
+      // handle hover once per frame
+      if (hoverDirty) {
+        hoverDirty = false
+
+        raycaster.setFromCamera(mouse, camera)
+
+        // 1) intersect point cloud to find mouseWorld
+        const pointHits = raycaster.intersectObject(pointCloud)
+        if (pointHits.length > 0) {
+          mouseWorld = pointHits[0].point.clone()
+        } else {
+          // fallback: ray-sphere intersection
+          const ray = raycaster.ray
+          const sphereRadius = sphereEngine.getBaseRadius()
+          const sphereCenter = new THREE.Vector3(0, 0, 0)
+          const oc = ray.origin.clone().sub(sphereCenter)
+          const a = ray.direction.dot(ray.direction)
+          const b = 2 * oc.dot(ray.direction)
+          const c = oc.dot(oc) - sphereRadius * sphereRadius * 1.5 // a bit bigger
+          const discriminant = b * b - 4 * a * c
+          if (discriminant > 0) {
+            const t = (-b - Math.sqrt(discriminant)) / (2 * a)
+            if (t > 0) {
+              mouseWorld = ray.origin
+                .clone()
+                .add(ray.direction.clone().multiplyScalar(t))
+            }
+          } else {
+            mouseWorld = null
+          }
+        }
+
+        // 2) find closest card to mouseWorld
+        let newHoveredId: string | null = null
+        if (mouseWorld) {
+          const cards = cardSystem.getCards()
+          let closestDist = 20
+          cards.forEach((card) => {
+            const dist = card.cardMesh.position.distanceTo(mouseWorld!)
+            if (dist < closestDist) {
+              closestDist = dist
+              newHoveredId = card.mapped.id
+            }
+          })
+        }
+
+        // 3) only update React if the hovered card actually changed
+        if (newHoveredId !== lastHoveredId) {
+          lastHoveredId = newHoveredId
+
+          if (newHoveredId) {
+            const cards = cardSystem.getCards()
+            const card = cards.find((c) => c.mapped.id === newHoveredId)
+            setHovered(card ? card.mapped : null)
+          } else {
+            setHovered(null)
+          }
+        }
+      }
+
+      // feed mouseWorld into card system for proximity activation
+      cardSystem.updateMousePosition(mouseWorld)
+      cardSystem.update(deltaTime, elapsed)
+
+      // slow rotation for all elements
+      const rotation = elapsed * 0.015
+      pointCloud.rotation.y = rotation
+      cardSystem.getCardGroup().rotation.y = rotation
+      cardSystem.getWireGroup().rotation.y = rotation
+      cardSystem.getInterCardWireGroup().rotation.y = rotation
+      ambientPoints.rotation.y = rotation * 0.35
+
       controls.update()
-      renderer.render(scene, camera)
+
+      if (postProcessing) {
+        postProcessing.update(elapsed)
+        postProcessing.composer.render()
+      } else {
+        renderer.render(scene, camera)
+      }
     }
+
     animate()
 
     // resize
     const onResize = () => {
       if (!mountRef.current) return
       const r = mountRef.current.getBoundingClientRect()
-      const w = r.width || window.innerWidth
-      const h = r.height || window.innerHeight
-      renderer.setSize(w, h)
-      camera.aspect = w / h
+      const newW = r.width || window.innerWidth
+      const newH = r.height || window.innerHeight
+      setHeight(newH)
+
+      camera.aspect = newW / newH
       camera.updateProjectionMatrix()
+      renderer.setSize(newW, newH)
+      if (postProcessing) {
+        postProcessing.resize(newW, newH)
+      }
     }
+
     window.addEventListener('resize', onResize)
 
+    // cleanup
     return () => {
-      window.removeEventListener('resize', onResize)
-      renderer.domElement.removeEventListener('pointerdown', onPointerDown)
+      isRunning = false
       cancelAnimationFrame(raf)
+      window.removeEventListener('resize', onResize)
+      renderer.domElement.removeEventListener('pointermove', onPointerMove)
+      renderer.domElement.removeEventListener('pointerdown', onPointerDown)
 
-      scene.traverse((child: any) => {
-        if (child.geometry) child.geometry.dispose()
-        if (child.material) {
-          if (Array.isArray(child.material))
-            child.material.forEach((m: any) => m.dispose())
-          else child.material.dispose()
+      // dispose scene geometry/materials
+      scene.traverse((obj) => {
+        if ((obj as any).geometry) {
+          ;(obj as any).geometry.dispose()
         }
-        if (child.material?.map) child.material.map.dispose?.()
+        if ((obj as any).material) {
+          const mat = (obj as any).material
+          if (Array.isArray(mat)) mat.forEach((m) => m.dispose())
+          else mat.dispose()
+        }
       })
 
-      if (renderer.domElement.parentElement) {
-        renderer.domElement.parentElement.removeChild(renderer.domElement)
-      }
+      // you *can* add this if you want:
+      // postProcessing?.composer.dispose()
+
       renderer.dispose()
       rendererRef.current = null
     }
   }, [])
+
+  // derive a human-readable location label from hovered node
+  let hoveredLocationLabel: { name: string; nameCn?: string } | null = null
+  if (hovered) {
+    const baseId = hovered.parentLocationId ?? hovered.id
+    const loc = journeyData.locations.find((l) => l.id === baseId)
+    if (loc) {
+      hoveredLocationLabel = { name: loc.name, nameCn: loc.nameCn }
+    }
+  }
 
   return (
     <>
       <div
         ref={mountRef}
         className="w-full h-full"
-        style={{ width: '100vw', height: '100vh' }}
+        style={{ width: '100vw', height }}
       />
-      <div className="absolute bottom-8 left-8 max-w-md pointer-events-none">
-        <h2 className="text-xs uppercase tracking-[0.3em] opacity-60 mb-2">
-          Data-Driven Topography
-        </h2>
-        <p className="text-sm opacity-40 leading-relaxed">
-          Positions derive from language balance (x) and time spiral (z).
-          Terrain drama scales with intensity, valence, significance, and
-          duration.
-        </p>
-      </div>
-      <div className="absolute bottom-8 right-8 text-right pointer-events-none">
+
+      {/* hovered info pill */}
+      {hoveredLocationLabel && (
+        <div className="absolute top-6 left-6 pointer-events-none">
+          <div className="px-3 py-1.5 rounded-full bg-black/70 border border-white/10 shadow-lg backdrop-blur-sm">
+            <div className="text-[11px] font-mono tracking-tight">
+              {hoveredLocationLabel.name}
+            </div>
+            {hoveredLocationLabel.nameCn && (
+              <div className="text-[10px] opacity-60 mt-0.5">
+                {hoveredLocationLabel.nameCn}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* selected detailed HUD */}
+      <div className="absolute bottom-6 right-6 pointer-events-none">
         <MemoryHUD selected={selected} />
+      </div>
+
+      {/* bottom-left data readout */}
+      <div className="absolute bottom-6 left-6 pointer-events-none">
+        <div className="text-[9px] font-mono opacity-25 leading-relaxed">
+          <div>RENDER: POINT_CLOUD</div>
+          <div>NODES: ACTIVE</div>
+          <div>INTERACTION: PROXIMITY</div>
+        </div>
       </div>
     </>
   )

@@ -1,19 +1,29 @@
 import * as THREE from 'three'
-import { JourneyData, MemoryLocation, MemoryConnection } from './schema'
+import {
+  JourneyData,
+  MemoryLocation,
+  MemoryConnection,
+  MemoryDocument,
+} from './schema'
 
 export interface MappedLocation {
   id: string
   pos: THREE.Vector3
   baseColor: THREE.Color
+
   labelOpacity: number
   haloOpacity: number
   labelScale: number
+
   elevationBias: number
   amplitude: number
   roughness: number
   erosion: number
   ridgeFactor: number
+
   isVisit?: boolean
+  parentLocationId?: string
+  memoryType?: MemoryDocument['type']
 }
 
 export interface MappedConnection {
@@ -34,16 +44,18 @@ export interface FeatureBundle {
   }
 }
 
-const clamp01 = (v: number) => Math.max(0, Math.min(1, v))
+// ----------------- helpers -----------------
+
+const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
+
 const remap = (
   v: number,
   inMin: number,
   inMax: number,
   outMin: number,
   outMax: number,
-) => outMin + clamp01((v - inMin) / (inMax - inMin)) * (outMax - outMin)
+) => outMin + clamp01((v - inMin) / (inMax - inMin || 1)) * (outMax - outMin)
 
-// compute a rough midpoint year from location period/year
 function midpointYear(l: MemoryLocation): number {
   if (l.period?.start || l.period?.end) {
     const start = l.period?.start
@@ -55,71 +67,139 @@ function midpointYear(l: MemoryLocation): number {
   return l.year ?? 0
 }
 
-// non-linear, data-driven placement:
-// x ← languageBalance (zh→left, en→right), with repulsive jitter
-// z ← time spiral based on midpoint year so points arc, not align
-// y is computed later by terrain engine
+// Base city positions:
+// x ← languageBalance; z ← time spiral
 function positionFromData(locs: MemoryLocation[]): Map<string, THREE.Vector3> {
-  const xs: number[] = []
   const years = locs.map(midpointYear).filter((y) => y > 0)
-  const minYear = Math.min(...years)
-  const maxYear = Math.max(...years)
+  const minYear = years.length ? Math.min(...years) : 2000
+  const maxYear = years.length ? Math.max(...years) : 2025
+  const yearSpan = Math.max(1, maxYear - minYear)
 
-  // base X from language balance
-  const xBase = (lb: number) => remap(lb, -1, 1, -120, 120)
+  const layout = new Map<string, THREE.Vector3>()
 
-  // time → spiral radius/angle
-  const spiral = (y: number) => {
-    const t = (y - minYear) / Math.max(1, maxYear - minYear)
-    const angle = t * Math.PI * 2.2 // ~ >1 revolution
-    const radius = remap(t, 0, 1, 20, 120)
-    return { angle, radius }
+  const timeSpiral = (year: number) => {
+    const t = (year - minYear) / yearSpan
+    const angle = t * Math.PI * 3.5
+    // 🔽 tighten radius
+    const radius = remap(t, 0, 1, 30, 90)
+    const x = Math.cos(angle) * radius
+    const z = Math.sin(angle) * radius
+    return new THREE.Vector3(x, 0, z)
   }
 
-  // simple repulsion jitter by index to avoid overlaps
-  const out = new Map<string, THREE.Vector3>()
-  locs.forEach((l, i) => {
-    const mid = midpointYear(l) || minYear
-    const { angle, radius } = spiral(mid)
-    const x = xBase(l.languageBalance) + Math.sin(i * 2.17) * 8
-    const z = Math.cos(angle) * radius + Math.cos(i * 1.31) * 6
-    out.set(l.id, new THREE.Vector3(x, 0, z))
+  locs.forEach((loc, idx) => {
+    const lang = clamp01((loc.languageBalance + 1) / 2) // -1..+1 → 0..1
+    const xLang = remap(lang, 0, 1, -80, 80) // also slightly tighter
+
+    const year = midpointYear(loc) || (minYear + maxYear) / 2
+    const tPos = timeSpiral(year)
+
+    const x = xLang * 0.6 + tPos.x * 0.4
+    const z = tPos.z
+
+    const jitter = 6
+    const jx =
+      (Math.sin(idx * 12.917) * 0.5 + (loc.isVisit ? 0.25 : 0)) * jitter
+    const jz = Math.cos(idx * 9.731) * 0.5 * jitter
+
+    layout.set(loc.id, new THREE.Vector3(x + jx, 0, z + jz))
   })
-  return out
+
+  return layout
 }
 
-export function mapJourneyToFeatures(data: JourneyData): FeatureBundle {
-  // derive initial positions
-  const layout = positionFromData(data.locations)
+function terrainFromLocation(loc: MemoryLocation) {
+  const intensity = clamp01(loc.intensity)
+  const valence = THREE.MathUtils.clamp(loc.valence, -1, 1)
+  const significance = clamp01(loc.significance)
+  const durationYears = loc.duration ?? 1
 
-  // for chroma shift normalization
-  const xs = data.locations.map((l) => layout.get(l.id)!.x)
+  const elevationBias = significance * 18 + intensity * 14 + valence * 10
+  const amplitude = remap(intensity, 0, 1, 6, 22)
+  const roughness = remap(durationYears, 0, 18, 0.18, 1.1)
+  const erosion = remap(1 - significance, 0, 1, 0.12, 0.9)
+  const ridgeFactor = remap(Math.abs(valence), 0, 1, 0.05, 0.95)
+
+  return { elevationBias, amplitude, roughness, erosion, ridgeFactor }
+}
+
+function modFromDocument(doc: MemoryDocument | undefined) {
+  if (!doc) {
+    return {
+      ampMul: 0.9,
+      roughMul: 1.0,
+      ridgeMul: 1.0,
+      biasAdd: 0,
+      colorTint: new THREE.Color(1, 1, 1),
+    }
+  }
+
+  const sentiment = doc.sentiment ?? 0
+  const lang = doc.language === 'zh' ? -1 : doc.language === 'en' ? 1 : 0
+
+  let ampMul = 1.0
+  let roughMul = 1.0
+  let ridgeMul = 1.0
+  let biasAdd = 0
+
+  switch (doc.type) {
+    case 'receipt':
+      ampMul = 0.85
+      roughMul = 1.2
+      biasAdd = sentiment * 3.5
+      break
+    case 'photo':
+      ampMul = 1.25
+      ridgeMul = 1.15
+      biasAdd = sentiment * 6
+      break
+    case 'letter':
+      ampMul = 1.15
+      roughMul = 1.25
+      biasAdd = sentiment * 5
+      break
+    case 'document':
+      ampMul = 0.95
+      roughMul = 0.85
+      ridgeMul = 0.9
+      biasAdd = sentiment * 2.5
+      break
+  }
+
+  const colorTint = new THREE.Color(
+    1 + sentiment * 0.22,
+    1 + sentiment * 0.12,
+    1 + lang * 0.12,
+  )
+
+  return { ampMul, roughMul, ridgeMul, biasAdd, colorTint }
+}
+
+// ----------------- main mapping -----------------
+
+export function mapJourneyToFeatures(data: JourneyData): FeatureBundle {
+  const baseLayout = positionFromData(data.locations)
+
+  const xs = data.locations.map((l) => baseLayout.get(l.id)!.x)
   const minX = Math.min(...xs)
   const maxX = Math.max(...xs)
+  const spanX = maxX - minX || 1
 
-  const mapped: MappedLocation[] = data.locations.map((loc) => {
-    const baseColor = new THREE.Color(loc.color)
+  const mapped: MappedLocation[] = []
 
-    // stronger, more "dramatic" mapping
-    const elevationBias =
-      loc.significance * 18 + loc.intensity * 14 + loc.valence * 10
-    const amplitude = remap(loc.intensity, 0, 1, 6, 26) // ↑ amplitude band
-    const roughness = remap(Math.abs(loc.languageBalance), 0, 1, 0.35, 0.08)
-    const erosion = remap(loc.duration ?? 0.2, 0, 3, 0.15, 0.85) // longer → smoother
-    const ridgeFactor =
-      loc.type === 'origin'
-        ? 0.9
-        : loc.type === 'visit'
-          ? 0.4
-          : remap(loc.intensity, 0, 1, 0.3, 0.85)
+  // base city nodes
+  data.locations.forEach((loc) => {
+    const baseColor = new THREE.Color((loc as any).color ?? '#ffffff')
+    const pos = baseLayout.get(loc.id)!.clone()
 
-    const labelOpacity = remap(loc.significance, 0, 1, 0.35, 0.95)
-    const haloOpacity = remap(loc.significance, 0, 1, 0.025, 0.1)
-    const labelScale = remap(loc.significance, 0, 1, 16, 26)
+    const { elevationBias, amplitude, roughness, erosion, ridgeFactor } =
+      terrainFromLocation(loc)
 
-    const pos = layout.get(loc.id)!.clone()
+    const labelOpacity = remap(loc.significance, 0, 1, 0.35, 1.0)
+    const haloOpacity = remap(loc.intensity, 0, 1, 0.3, 0.95)
+    const labelScale = remap(loc.significance, 0, 1, 0.9, 1.6)
 
-    return {
+    mapped.push({
       id: loc.id,
       pos,
       baseColor,
@@ -132,42 +212,111 @@ export function mapJourneyToFeatures(data: JourneyData): FeatureBundle {
       erosion,
       ridgeFactor,
       isVisit: loc.isVisit,
-    }
+      parentLocationId: undefined,
+      memoryType: undefined,
+    })
+
+    // orbiting memory nodes (grouped by location)
+    const memories = loc.memories ?? []
+    if (memories.length === 0) return
+
+    // 🔽 tighter ring
+    const ringRadius = 6 + loc.intensity * 6
+
+    memories.forEach((doc, idx) => {
+      const angle =
+        (idx / Math.max(1, memories.length)) * Math.PI * 2 +
+        loc.languageBalance * 0.5
+
+      const offsetX = Math.cos(angle) * ringRadius
+      const offsetZ = Math.sin(angle) * ringRadius
+      const offsetY = (loc.valence || 0) * 2.5 + (doc.sentiment ?? 0) * 3.5
+
+      const childPos = pos
+        .clone()
+        .add(new THREE.Vector3(offsetX, offsetY, offsetZ))
+
+      const mod = modFromDocument(doc)
+      const childBaseColor = baseColor.clone().multiply(mod.colorTint)
+
+      const childElevationBias = elevationBias + mod.biasAdd
+      const childAmplitude = amplitude * mod.ampMul
+      const childRoughness = THREE.MathUtils.clamp(
+        roughness * mod.roughMul,
+        0.05,
+        1.5,
+      )
+      const childErosion = erosion
+      const childRidge = THREE.MathUtils.clamp(
+        ridgeFactor * mod.ridgeMul,
+        0.01,
+        1.5,
+      )
+
+      const childLabelOpacity = labelOpacity * 0.9
+      const childHaloOpacity = haloOpacity * 1.05
+      const childLabelScale = labelScale * 0.85
+
+      mapped.push({
+        id: `${loc.id}::mem-${idx}`,
+        pos: childPos,
+        baseColor: childBaseColor,
+        labelOpacity: childLabelOpacity,
+        haloOpacity: childHaloOpacity,
+        labelScale: childLabelScale,
+        elevationBias: childElevationBias,
+        amplitude: childAmplitude,
+        roughness: childRoughness,
+        erosion: childErosion,
+        ridgeFactor: childRidge,
+        isVisit: loc.isVisit,
+        parentLocationId: loc.id,
+        memoryType: doc.type,
+      })
+    })
   })
 
-  // index access
-  const byId = new Map<string, MappedLocation>(mapped.map((m) => [m.id, m]))
+  // connections between cities (base nodes)
+  const mappedById = new Map<string, MappedLocation>()
+  mapped.forEach((m) => mappedById.set(m.id, m))
 
-  const mappedConnections: MappedConnection[] = data.connections
-    .map((c) => {
-      const from = byId.get(c.from)
-      const to = byId.get(c.to)
-      if (!from || !to) return null
+  const mappedConnections: MappedConnection[] = []
 
-      const weight = clamp01(c.weight ?? 0.5)
-      const yFrom = midpointYear(data.locations.find((l) => l.id === c.from)!)
-      const yTo = midpointYear(data.locations.find((l) => l.id === c.to)!)
-      const dt = Math.max(1, Math.abs(yTo - yFrom))
-      const curvatureY = remap(dt, 1, 10, 3, 16) * (0.6 + weight)
+  data.connections.forEach((conn: MemoryConnection) => {
+    const fromBase = mappedById.get(conn.from)
+    const toBase = mappedById.get(conn.to)
+    if (!fromBase || !toBase) return
 
-      const color = from.baseColor.clone().lerp(to.baseColor, 0.5)
-      const opacity = remap(weight, 0, 1, 0.18, 0.6)
+    const weight = clamp01(conn.weight ?? 0.7)
+    const curvatureY = remap(weight, 0, 1, 10, 30)
 
-      return { from, to, weight, curvatureY, color, opacity }
+    const color = new THREE.Color()
+    color.copy(fromBase.baseColor).lerp(toBase.baseColor, 0.5)
+
+    const baseOpacity = remap(weight, 0, 1, 0.25, 0.85)
+
+    mappedConnections.push({
+      from: fromBase,
+      to: toBase,
+      weight,
+      curvatureY,
+      color,
+      opacity: baseOpacity,
     })
-    .filter((x): x is MappedConnection => !!x)
+  })
 
+  // global chroma shift for the sphere
   const chromaShift = (xNorm: number) => {
     const c = new THREE.Color()
     c.setRGB(
-      remap(1 - xNorm, 0, 1, 0.12, 0.4), // warmer left
-      remap(xNorm, 0, 1, 0.08, 0.22),
-      remap(xNorm, 0, 1, 0.18, 0.5), // cooler right
+      remap(1 - xNorm, 0, 1, 0.16, 0.45),
+      remap(xNorm, 0, 1, 0.07, 0.22),
+      remap(xNorm, 0, 1, 0.18, 0.55),
     )
     return c
   }
 
-  const exaggeration = 1.35 // global multiplier for "drama"
+  const exaggeration = 1.35
 
   return { mapped, mappedConnections, global: { chromaShift, exaggeration } }
 }
