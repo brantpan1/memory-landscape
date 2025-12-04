@@ -8,11 +8,13 @@ import { mapJourneyToFeatures, MappedLocation } from '@/lib/featureMapping'
 import { PointCloudSphere } from '@/lib/pointCloudSphere'
 import { DataCardSystem } from '@/lib/dataCardSystem'
 import { createPostProcessing, PostProcessingSetup } from '@/lib/postProcessing'
+import { SoundEngine } from '@/lib/soundEngine'
 import MemoryHUD from './MemoryHUD'
 
 export default function TopographyScene() {
   const mountRef = useRef<HTMLDivElement>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
+  const soundRef = useRef<SoundEngine | null>(null)
 
   const [selected, setSelected] = useState<MappedLocation | undefined>(
     undefined,
@@ -72,6 +74,10 @@ export default function TopographyScene() {
     controls.target.set(0, 10, 0)
     controls.autoRotate = false
     controls.autoRotateSpeed = 0
+
+    // sound
+    const soundEngine = new SoundEngine()
+    soundRef.current = soundEngine
 
     // data
     const features = mapJourneyToFeatures(journeyData)
@@ -135,6 +141,7 @@ export default function TopographyScene() {
     let hoverDirty = false
     let lastHoveredId: string | null = null
     let isRunning = true
+    let currentHoveredMapped: MappedLocation | null = null
 
     const onPointerMove = (ev: PointerEvent) => {
       const bounds = renderer.domElement.getBoundingClientRect()
@@ -144,6 +151,8 @@ export default function TopographyScene() {
     }
 
     const onPointerDown = () => {
+      soundEngine.start()
+
       if (!lastHoveredId) return
       const cards = cardSystem.getCards()
       const card = cards.find((c) => c.mapped.id === lastHoveredId)
@@ -220,14 +229,18 @@ export default function TopographyScene() {
         }
 
         // 3) only update React if the hovered card actually changed
+
         if (newHoveredId !== lastHoveredId) {
           lastHoveredId = newHoveredId
 
           if (newHoveredId) {
             const cards = cardSystem.getCards()
             const card = cards.find((c) => c.mapped.id === newHoveredId)
-            setHovered(card ? card.mapped : null)
+            const mapped = card ? card.mapped : null
+            currentHoveredMapped = mapped
+            setHovered(mapped)
           } else {
+            currentHoveredMapped = null
             setHovered(null)
           }
         }
@@ -246,6 +259,13 @@ export default function TopographyScene() {
       ambientPoints.rotation.y = rotation * 0.35
 
       controls.update()
+
+      soundEngine.update({
+        cameraPos: camera.position,
+        mouseNdc: mouse,
+        hovered: currentHoveredMapped,
+        time: elapsed,
+      })
 
       if (postProcessing) {
         postProcessing.update(elapsed)
