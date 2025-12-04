@@ -278,7 +278,7 @@ export class NodeSystem {
     }
 
     // compute base target activations
-    let bestNode: NodeState | null = null
+    let bestNode: NodeState | undefined 
     let bestT = 0
 
     this.nodes.forEach((node) => {
@@ -326,7 +326,7 @@ export class NodeSystem {
       const type = (mesh as any).__type as string
       if (!node) return
 
-      const mat = mesh.material as THREE.MeshBasicMaterial
+const mat = (mesh as THREE.Mesh).material as THREE.MeshBasicMaterial
       const a = node.activation
 
       // time-based pulse with random phase

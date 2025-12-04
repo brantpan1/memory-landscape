@@ -10,13 +10,15 @@ interface LocationMeta {
   nameCn?: string
   period?: { start: string; end?: string }
   year?: number
-  memories?: Array<{
-    type: MemoryType
-    content: string
-    date?: string
-    sentiment?: number
-    language?: 'en' | 'zh' | 'mixed'
-  }>
+  memories?: Array<Memory>
+}
+
+interface Memory {
+  type: MemoryType
+  content: string
+  date?: string
+  sentiment?: number
+  language?: 'en' | 'zh' | 'mixed'
 }
 
 interface CardMaterialRef {
@@ -191,7 +193,7 @@ export class DataCardSystem {
     locationData: LocationMeta[],
   ): {
     loc: LocationMeta
-    memory: LocationMeta['memories'][number] | null
+    memory: Memory | null
     memoryIndex: number
   } | null {
     if (m.parentLocationId) {
@@ -331,7 +333,7 @@ export class DataCardSystem {
 
   private createMemoryCardMesh(
     loc: LocationMeta,
-    mem: LocationMeta['memories'][number],
+    mem: Memory,
     m: MappedLocation,
     memIndex: number,
   ): THREE.Group {
@@ -343,7 +345,7 @@ export class DataCardSystem {
     const isDoc = mem.type === 'document'
 
     const baseWidth = 13
-    let width = baseWidth
+    const width = baseWidth
     let height = baseWidth * 0.75
 
     if (isReceipt) height *= 1.25
@@ -443,7 +445,7 @@ export class DataCardSystem {
   private drawReceiptMemory(
     ctx: CanvasRenderingContext2D,
     loc: LocationMeta,
-    mem: LocationMeta['memories'][number],
+    mem: Memory,
     m: MappedLocation,
     memIndex: number,
   ) {
@@ -498,7 +500,7 @@ export class DataCardSystem {
   private drawPhotoMemory(
     ctx: CanvasRenderingContext2D,
     loc: LocationMeta,
-    mem: LocationMeta['memories'][number],
+    mem: Memory,
     m: MappedLocation,
     memIndex: number,
   ) {
@@ -538,7 +540,7 @@ export class DataCardSystem {
   private drawLetterMemory(
     ctx: CanvasRenderingContext2D,
     loc: LocationMeta,
-    mem: LocationMeta['memories'][number],
+    mem: Memory,
     m: MappedLocation,
     memIndex: number,
   ) {
@@ -580,7 +582,7 @@ export class DataCardSystem {
   private drawDocumentMemory(
     ctx: CanvasRenderingContext2D,
     loc: LocationMeta,
-    mem: LocationMeta['memories'][number],
+    mem: Memory,
     m: MappedLocation,
     memIndex: number,
   ) {

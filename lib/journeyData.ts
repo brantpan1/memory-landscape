@@ -10,7 +10,7 @@ export const journeyData: JourneyData = {
       id: 'nanjing',
       name: 'Nanjing',
       nameCn: '南京',
-      type: 'family-root',
+      type: 'family',
       // recurring visits, but we just bracket it
       period: { start: '2006-07-01', end: '2024-08-01' },
       intensity: 0.75,
@@ -57,7 +57,7 @@ export const journeyData: JourneyData = {
       id: 'chicago',
       name: 'Chicago Suburbs',
       nameCn: '芝加哥郊区',
-      type: 'home',
+      type: 'origin',
       period: { start: '2004-01-01', end: '2022-08-15' },
       intensity: 0.8,
       valence: 0.2,
@@ -97,7 +97,7 @@ export const journeyData: JourneyData = {
       id: 'boston',
       name: 'Boston – College',
       nameCn: '波士顿',
-      type: 'college',
+      type: 'education',
       period: { start: '2022-09-01', end: '2026-05-01' }, // undergrad window
       intensity: 0.95,
       valence: 0.7,
@@ -177,7 +177,7 @@ export const journeyData: JourneyData = {
       id: 'london',
       name: 'London Semester',
       nameCn: '伦敦',
-      type: 'abroad',
+      type: 'visit',
       // one semester abroad during college
       period: { start: '2023-01-10', end: '2023-05-20' },
       intensity: 0.9,
