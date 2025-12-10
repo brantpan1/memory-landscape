@@ -73,21 +73,62 @@ export class DataCardSystem {
 
       const surfacePos = sphere.getSurfacePosition(m.pos)
 
+      // -------- positioning: hubs vs memories --------
+      const isMemory = !!m.parentLocationId
       const outward = surfacePos.clone().normalize()
-      const baseDistance =
-        m.parentLocationId != null
-          ? 20 + Math.random() * 10
-          : 28 + Math.random() * 18
 
-      const cardPos = surfacePos
-        .clone()
-        .add(outward.multiplyScalar(baseDistance))
-
-      const tangent1 = new THREE.Vector3(0, 1, 0).cross(outward).normalize()
+      // tangent frame
+      let tangent1 = new THREE.Vector3(0, 1, 0).cross(outward)
+      if (tangent1.lengthSq() < 1e-4) {
+        tangent1 = new THREE.Vector3(1, 0, 0).cross(outward)
+      }
+      tangent1.normalize()
       const tangent2 = outward.clone().cross(tangent1).normalize()
-      const spread = m.parentLocationId ? 10 : 18
-      cardPos.add(tangent1.multiplyScalar((Math.random() - 0.5) * spread))
-      cardPos.add(tangent2.multiplyScalar((Math.random() - 0.5) * spread))
+
+      let cardPos = new THREE.Vector3()
+
+      if (!isMemory) {
+        // ---- LOCATION HUB CARD ----
+        const baseDistance = 28 + Math.random() * 14
+        cardPos
+          .copy(surfacePos)
+          .add(outward.clone().multiplyScalar(baseDistance))
+
+        const spread = 10
+        cardPos.add(
+          tangent1.clone().multiplyScalar((Math.random() - 0.5) * spread),
+        )
+        cardPos.add(
+          tangent2.clone().multiplyScalar((Math.random() - 0.5) * spread),
+        )
+      } else {
+        // ---- MEMORY CARD (ring/spiral around location) ----
+        const idx = m.memoryIndex ?? memoryIndex ?? 0
+        const count = m.memoryCount ?? loc.memories?.length ?? 1
+
+        const ringBase = 26 // base distance outward in tangent plane
+        const radialStep = 4
+        const ringRadius = ringBase + radialStep * idx
+
+        const angle =
+          (idx / Math.max(1, count)) * Math.PI * 2 +
+          count * 0.15 +
+          (loc.name.length % 7) * 0.08
+
+        const ringOffset = tangent1
+          .clone()
+          .multiplyScalar(Math.cos(angle) * ringRadius)
+          .add(tangent2.clone().multiplyScalar(Math.sin(angle) * ringRadius))
+
+        cardPos.copy(surfacePos)
+        // step off the surface a bit, then out into the ring
+        cardPos.add(outward.clone().multiplyScalar(18))
+        cardPos.add(ringOffset)
+
+        // slight layering based on amplitude/sentiment
+        const ampLayer = (m.amplitude ?? 0) * 0.6
+        cardPos.add(outward.clone().multiplyScalar(ampLayer))
+      }
 
       const cardMesh =
         memory && m.parentLocationId
@@ -134,7 +175,6 @@ export class DataCardSystem {
       anchorDot.position.copy(surfacePos)
       this.wireGroup.add(anchorDot)
 
-      // 🔑 collect all materials once here
       const materials = this.collectMaterials(cardMesh)
 
       this.cards.push({
@@ -203,7 +243,7 @@ export class DataCardSystem {
       const match = m.id.match(/::mem-(\d+)/)
       const idx = match ? parseInt(match[1], 10) : 0
       const mem = mems[idx]
-      if (!mem) return { loc: parent, memory: null, memoryIndex: -1 }
+      if (!mem) return { loc: parent, memory: null, memoryIndex: idx }
       return { loc: parent, memory: mem, memoryIndex: idx }
     }
 
@@ -211,7 +251,6 @@ export class DataCardSystem {
     if (!loc) return null
     return { loc, memory: null, memoryIndex: -1 }
   }
-
   // --------- card creation: location hub ---------
 
   private createLocationCardMesh(
@@ -684,7 +723,6 @@ export class DataCardSystem {
       card.cardMesh.rotation.y =
         card.tiltY + Math.cos(time * 0.35 + card.floatPhase) * 0.05
 
-      // wires
       const wirePos = card.wire.geometry.attributes
         .position as THREE.BufferAttribute
       wirePos.setXYZ(0, card.surfacePos.x, card.surfacePos.y, card.surfacePos.z)
@@ -707,7 +745,6 @@ export class DataCardSystem {
       const anchorBase = (anchorMat as any).userData?.baseOpacity ?? 0.85
       anchorMat.opacity = anchorBase * (0.6 + card.activation * 0.6)
 
-      // 🔑 only update materials if activation actually changed
       if (Math.abs(card.activation - prevActivation) > 0.001) {
         const factor = 0.85 + card.activation * 0.35
         card.materials.forEach(({ mat, baseOpacity }) => {

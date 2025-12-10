@@ -278,7 +278,7 @@ export class NodeSystem {
     }
 
     // compute base target activations
-    let bestNode: NodeState | undefined 
+    let bestNode: NodeState | undefined
     let bestT = 0
 
     this.nodes.forEach((node) => {
@@ -320,16 +320,14 @@ export class NodeSystem {
       )
     })
 
-    // update node meshes (flashing / on-off)
     this.nodeGroup.children.forEach((mesh) => {
       const node = (mesh as any).__node as NodeState
       const type = (mesh as any).__type as string
       if (!node) return
 
-const mat = (mesh as THREE.Mesh).material as THREE.MeshBasicMaterial
+      const mat = (mesh as THREE.Mesh).material as THREE.MeshBasicMaterial
       const a = node.activation
 
-      // time-based pulse with random phase
       const pulse =
         0.5 +
         0.5 *
@@ -337,8 +335,6 @@ const mat = (mesh as THREE.Mesh).material as THREE.MeshBasicMaterial
             time * (1.5 + node.noiseSeed * 0.07) + node.noiseSeed * 10.123,
           )
 
-      // gating for "turning off" behaviour
-      // if activation is very low and pulse is low, hard kill
       const gate =
         a < 0.08 && pulse < 0.3
           ? 0

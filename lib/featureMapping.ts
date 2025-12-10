@@ -24,6 +24,8 @@ export interface MappedLocation {
   isVisit?: boolean
   parentLocationId?: string
   memoryType?: MemoryDocument['type']
+  memoryIndex?: number
+  memoryCount?: number
 }
 
 export interface MappedConnection {
@@ -80,8 +82,9 @@ function positionFromData(locs: MemoryLocation[]): Map<string, THREE.Vector3> {
   const timeSpiral = (year: number) => {
     const t = (year - minYear) / yearSpan
     const angle = t * Math.PI * 3.5
-    // 🔽 tighten radius
-    const radius = remap(t, 0, 1, 30, 90)
+
+    // ⬆️ much wider spiral radius so locations separate more on the sphere
+    const radius = remap(t, 0, 1, 60, 180)
     const x = Math.cos(angle) * radius
     const z = Math.sin(angle) * radius
     return new THREE.Vector3(x, 0, z)
@@ -89,15 +92,19 @@ function positionFromData(locs: MemoryLocation[]): Map<string, THREE.Vector3> {
 
   locs.forEach((loc, idx) => {
     const lang = clamp01((loc.languageBalance + 1) / 2) // -1..+1 → 0..1
-    const xLang = remap(lang, 0, 1, -80, 80) // also slightly tighter
+
+    // ⬆️ widen language band so east–west spread is larger
+    const xLang = remap(lang, 0, 1, -150, 150)
 
     const year = midpointYear(loc) || (minYear + maxYear) / 2
     const tPos = timeSpiral(year)
 
-    const x = xLang * 0.6 + tPos.x * 0.4
+    // lean a bit more on language separation than time spiral x
+    const x = xLang * 0.7 + tPos.x * 0.3
     const z = tPos.z
 
-    const jitter = 6
+    // ⬆️ slightly larger jitter to keep things visually distinct
+    const jitter = 10
     const jx =
       (Math.sin(idx * 12.917) * 0.5 + (loc.isVisit ? 0.25 : 0)) * jitter
     const jz = Math.cos(idx * 9.731) * 0.5 * jitter
@@ -190,6 +197,9 @@ export function mapJourneyToFeatures(data: JourneyData): FeatureBundle {
   // base city nodes
   data.locations.forEach((loc) => {
     const baseColor = new THREE.Color((loc as any).color ?? '#ffffff')
+
+    // ⬆️ if you want EVEN more separation, you can multiply here:
+    // const pos = baseLayout.get(loc.id)!.clone().multiplyScalar(1.8)
     const pos = baseLayout.get(loc.id)!.clone()
 
     const { elevationBias, amplitude, roughness, erosion, ridgeFactor } =
@@ -220,8 +230,8 @@ export function mapJourneyToFeatures(data: JourneyData): FeatureBundle {
     const memories = loc.memories ?? []
     if (memories.length === 0) return
 
-    // 🔽 tighter ring
-    const ringRadius = 6 + loc.intensity * 6
+    // ring radius around each location hub
+    const ringRadius = 8 + loc.intensity * 8
 
     memories.forEach((doc, idx) => {
       const angle =
@@ -272,6 +282,8 @@ export function mapJourneyToFeatures(data: JourneyData): FeatureBundle {
         isVisit: loc.isVisit,
         parentLocationId: loc.id,
         memoryType: doc.type,
+        memoryIndex: idx,
+        memoryCount: memories.length,
       })
     })
   })
