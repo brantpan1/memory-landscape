@@ -134,6 +134,9 @@ export default function TopographyScene() {
     const pointCloud = sphereEngine.generate(features)
     scene.add(pointCloud)
 
+    let morphRaw = 0
+    const morphDuration = 2.0
+
     const cardSystem = new DataCardSystem(
       features,
       sphereEngine,
@@ -301,6 +304,17 @@ export default function TopographyScene() {
       const elapsed = clock.getElapsedTime()
       const deltaTime = Math.min(elapsed - lastTime, 0.1)
       lastTime = elapsed
+
+      if (morphRaw < 1) {
+        morphRaw = Math.min(1, morphRaw + deltaTime / morphDuration)
+
+        // smoothstep ease in / ease out: 3 t^2 - 2 t^3
+        const t = morphRaw
+        const ease = t * t * (3 - 2 * t)
+
+        sphereEngine.setMorphT(ease)
+        cardSystem.setMorphT(ease) // 🔸 make cards follow the same morph
+      }
 
       if (pendingFocusId) {
         const cards = cardSystem.getCards()
@@ -546,7 +560,7 @@ export default function TopographyScene() {
       {focusMode !== 'none' && focusedLocationId && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
           <div className="inline-flex items-center gap-3 px-4 py-2 rounded-full bg-black/70 border border-white/15 backdrop-blur-sm pointer-events-auto">
-            <div className="flex flex-col">
+            <div className="flex flex-col ml-2 my-2">
               <span className="text-[10px] font-mono text-white/40 uppercase tracking-[0.2em]">
                 {focusMode === 'location' ? 'LOCATION' : 'MEMORY'}
               </span>

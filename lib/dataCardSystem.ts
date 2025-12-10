@@ -39,6 +39,9 @@ interface DataCard {
   tiltX: number
   tiltY: number
   materials: CardMaterialRef[]
+  flatSurfacePos: THREE.Vector3
+  sphereSurfacePos: THREE.Vector3
+  baseOffset: THREE.Vector3
 }
 
 interface ConnectionWire {
@@ -71,13 +74,16 @@ export class DataCardSystem {
       if (!meta) return
       const { loc, memory, memoryIndex } = meta
 
-      const surfacePos = sphere.getSurfacePosition(m.pos)
+      // --- sphere + flat anchors for morph ---
+      const sphereSurfacePos = sphere.getSurfacePosition(m.pos)
+      const flatSurfacePos = new THREE.Vector3(m.pos.x, 0, m.pos.z)
 
-      // -------- positioning: hubs vs memories --------
       const isMemory = !!m.parentLocationId
-      const outward = surfacePos.clone().normalize()
 
-      // tangent frame
+      // outward from the sphere surface (for nice ring orientation)
+      const outward = sphereSurfacePos.clone().normalize()
+
+      // tangent frame around the sphere
       let tangent1 = new THREE.Vector3(0, 1, 0).cross(outward)
       if (tangent1.lengthSq() < 1e-4) {
         tangent1 = new THREE.Vector3(1, 0, 0).cross(outward)
@@ -85,20 +91,21 @@ export class DataCardSystem {
       tangent1.normalize()
       const tangent2 = outward.clone().cross(tangent1).normalize()
 
-      let cardPos = new THREE.Vector3()
+      // we'll first build the position in "sphere mode"
+      const cardPosSphere = new THREE.Vector3()
 
       if (!isMemory) {
         // ---- LOCATION HUB CARD ----
         const baseDistance = 28 + Math.random() * 14
-        cardPos
-          .copy(surfacePos)
+        cardPosSphere
+          .copy(sphereSurfacePos)
           .add(outward.clone().multiplyScalar(baseDistance))
 
         const spread = 10
-        cardPos.add(
+        cardPosSphere.add(
           tangent1.clone().multiplyScalar((Math.random() - 0.5) * spread),
         )
-        cardPos.add(
+        cardPosSphere.add(
           tangent2.clone().multiplyScalar((Math.random() - 0.5) * spread),
         )
       } else {
@@ -120,20 +127,27 @@ export class DataCardSystem {
           .multiplyScalar(Math.cos(angle) * ringRadius)
           .add(tangent2.clone().multiplyScalar(Math.sin(angle) * ringRadius))
 
-        cardPos.copy(surfacePos)
-        // step off the surface a bit, then out into the ring
-        cardPos.add(outward.clone().multiplyScalar(18))
-        cardPos.add(ringOffset)
+        cardPosSphere.copy(sphereSurfacePos)
+        // step off surface a bit, then into ring
+        cardPosSphere.add(outward.clone().multiplyScalar(18))
+        cardPosSphere.add(ringOffset)
 
-        // slight layering based on amplitude/sentiment
         const ampLayer = (m.amplitude ?? 0) * 0.6
-        cardPos.add(outward.clone().multiplyScalar(ampLayer))
+        cardPosSphere.add(outward.clone().multiplyScalar(ampLayer))
       }
 
+      // create card mesh (visual)
       const cardMesh =
         memory && m.parentLocationId
           ? this.createMemoryCardMesh(loc, memory, m, memoryIndex)
           : this.createLocationCardMesh(loc, m)
+
+      // base offset is defined in sphere space
+      const baseOffset = cardPosSphere.clone().sub(sphereSurfacePos)
+
+      // initial state = flat mode (t = 0)
+      const surfacePos = flatSurfacePos.clone()
+      const cardPos = flatSurfacePos.clone().add(baseOffset)
 
       cardMesh.position.copy(cardPos)
 
@@ -144,6 +158,7 @@ export class DataCardSystem {
 
       this.cardGroup.add(cardMesh)
 
+      // wire from surface anchor → card
       const wireGeo = new THREE.BufferGeometry()
       const wirePositions = new Float32Array(6)
       wireGeo.setAttribute(
@@ -160,6 +175,7 @@ export class DataCardSystem {
       const wire = new THREE.Line(wireGeo, wireMat)
       this.wireGroup.add(wire)
 
+      // anchor dot at surface
       const anchorGeo = new THREE.SphereGeometry(
         m.parentLocationId ? 0.6 : 0.9,
         10,
@@ -190,6 +206,9 @@ export class DataCardSystem {
         tiltX,
         tiltY,
         materials,
+        flatSurfacePos,
+        sphereSurfacePos,
+        baseOffset,
       })
     })
 
@@ -697,6 +716,23 @@ export class DataCardSystem {
       } else {
         card.targetActivation = 0
       }
+    })
+  }
+  setMorphT(t: number) {
+    const clamped = Math.max(0, Math.min(1, t))
+    this.cards.forEach((card) => {
+      // interpolate surface position
+      card.surfacePos.lerpVectors(
+        card.flatSurfacePos,
+        card.sphereSurfacePos,
+        clamped,
+      )
+
+      // card base position follows the surface + its original offset
+      card.cardPos.copy(card.surfacePos).add(card.baseOffset)
+
+      // keep anchor dot on surface
+      card.anchorDot.position.copy(card.surfacePos)
     })
   }
 

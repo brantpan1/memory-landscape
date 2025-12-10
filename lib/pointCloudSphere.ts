@@ -6,10 +6,21 @@ import type { FeatureBundle, MappedLocation } from './featureMapping'
  * - Global silhouette deformed by nearby memories
  * - Local topography from fractal noise + memory fields
  * - Micro jitter over time for a living, TouchDesigner-ish feel
+ *
+ * Now extended with:
+ * - Plane → Sphere morph:
+ *   t = 0: flat unwrapped plane
+ *   t = 1: original sphere form (identical to previous implementation)
  */
 export class PointCloudSphere {
   private baseRadius = 80
   private pointCount = 45000
+
+  // morph state
+  private geometry: THREE.BufferGeometry | null = null
+  private flatPositions: Float32Array | null = null
+  private spherePositions: Float32Array | null = null
+  private currentMorphT = 1 // 1 = fully sphere by default
 
   constructor() {}
 
@@ -93,13 +104,17 @@ export class PointCloudSphere {
   }
 
   generate(features: FeatureBundle): THREE.Points {
-    const positions: number[] = []
+    // we’ll build two parallel position sets:
+    //  - positionsSphere: your original sphere-based points
+    //  - positionsFlat:   unwrapped plane for intro morph
+    const positionsSphere: number[] = []
+    const positionsFlat: number[] = []
     const colors: number[] = []
     const sizes: number[] = []
 
     const sphericalFeatures = this.precomputeSphericalFeatures(features)
 
-    // small helper to get silhouette deformation from nearby memories
+    // helper to get silhouette deformation from nearby memories
     const sampleSilhouetteField = (theta: number, phi: number) => {
       let field = 0
       let signedField = 0
@@ -133,8 +148,7 @@ export class PointCloudSphere {
       return { field: f, signed: s }
     }
 
-    // base point cloud: distributed over a sphere, but with strong
-    // silhouette modulation from your memory field
+    // ---------- 1) BASE SPHERE LAYER (unchanged behavior) ----------
     for (let i = 0; i < this.pointCount; i++) {
       // Fibonacci sphere param
       const y = 1 - (2 * (i + 0.5)) / this.pointCount
@@ -149,23 +163,32 @@ export class PointCloudSphere {
       const nDetail = this.fbm(theta * 1.7, phi * 1.3, 19.1) - 0.5
 
       // silhouette radius:
-      // - base radius
-      // - bulge from field (mass of nearby memories)
-      // - signed pushes outward/inward based on valence/bias
-      // - macro noise
       const silhouetteBump =
         field * 26.0 + signed * 12.0 + nMacro * 12.0 + nDetail * 4.0
       const radius = this.baseRadius + silhouetteBump
 
-      const x = radius * r * Math.cos(theta)
-      const yy = radius * y
-      const z = radius * r * Math.sin(theta)
-      positions.push(x, yy, z)
+      // original SPHERE position
+      const sx = radius * r * Math.cos(theta)
+      const sy = radius * y
+      const sz = radius * r * Math.sin(theta)
+      positionsSphere.push(sx, sy, sz)
+
+      // FLAT/UNWRAPPED position (plane)
+      // simple equirectangular-ish unwrap from (theta,phi) → (u,v)
+      const u = (((theta / (Math.PI * 2)) % 1) + 1) % 1 // 0..1 wrapped
+      const v = phi / Math.PI // 0..1
+      const planeScaleX = this.baseRadius * 3.2
+      const planeScaleZ = this.baseRadius * 1.8
+
+      const px = (u - 0.5) * planeScaleX * 2
+      const pz = (v - 0.5) * planeScaleZ * 2
+      const py = radius - this.baseRadius // height as elevation above plane
+      positionsFlat.push(px, py, pz)
 
       // Color mapping:
       // - base gradient from global chromaShift (xNorm)
       // - luminance from altitude
-      const angleNorm = (((theta / (Math.PI * 2)) % 1) + 1) % 1
+      const angleNorm = u
       const baseColor = features.global.chromaShift
         ? features.global.chromaShift(angleNorm)
         : new THREE.Color(0.55, 0.45, 0.6)
@@ -187,7 +210,7 @@ export class PointCloudSphere {
       sizes.push(0.35 + Math.random() * 0.45)
     }
 
-    // cluster layer: dense halos around each memory (cards anchor here)
+    // ---------- 2) CLUSTER LAYER (unchanged behavior, now with flat positions too) ----------
     sphericalFeatures.forEach((sf, idx) => {
       const m = sf.mapped as any
       const amp = m.amplitude ?? 14
@@ -210,10 +233,21 @@ export class PointCloudSphere {
           field * 20.0 + signed * 9.0 + localNoise * 8.0 + (sig - 0.5) * 12.0
         const radius = this.baseRadius + 6 + bump
 
-        const x = radius * Math.sin(jitterPhi) * Math.cos(jitterTheta)
-        const y = radius * Math.cos(jitterPhi)
-        const z = radius * Math.sin(jitterPhi) * Math.sin(jitterTheta)
-        positions.push(x, y, z)
+        // SPHERE position (original behavior)
+        const sx = radius * Math.sin(jitterPhi) * Math.cos(jitterTheta)
+        const sy = radius * Math.cos(jitterPhi)
+        const sz = radius * Math.sin(jitterPhi) * Math.sin(jitterTheta)
+        positionsSphere.push(sx, sy, sz)
+
+        // FLAT position
+        const u = (((jitterTheta / (Math.PI * 2)) % 1) + 1) % 1 // 0..1
+        const v = jitterPhi / Math.PI
+        const planeScaleX = this.baseRadius * 3.2
+        const planeScaleZ = this.baseRadius * 1.8
+        const px = (u - 0.5) * planeScaleX * 2
+        const pz = (v - 0.5) * planeScaleZ * 2
+        const py = radius - this.baseRadius
+        positionsFlat.push(px, py, pz)
 
         const base = new THREE.Color(m.baseColor ?? 0xffffff)
         const highlight = new THREE.Color(1.1, 0.95, 1.1)
@@ -227,17 +261,32 @@ export class PointCloudSphere {
       }
     })
 
+    // ---------- 3) Build geometry + material ----------
+    const spherePositionsArray = new Float32Array(positionsSphere)
+    const flatPositionsArray = new Float32Array(positionsFlat)
+
+    // sanity: they should be same length
+    // (if not, we’ve mismatched pushes somewhere)
+    if (spherePositionsArray.length !== flatPositionsArray.length) {
+      console.warn(
+        'PointCloudSphere: sphere/flat position array length mismatch',
+        spherePositionsArray.length,
+        flatPositionsArray.length,
+      )
+    }
+
+    // INITIAL visible positions = flat plane (for intro morph)
+    const initialPositions = new Float32Array(flatPositionsArray)
+
     const geometry = new THREE.BufferGeometry()
-    const positionAttr = new THREE.Float32BufferAttribute(positions, 3)
+    const positionAttr = new THREE.Float32BufferAttribute(initialPositions, 3)
     geometry.setAttribute('position', positionAttr)
     geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
     geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1))
 
-    // keep base positions for jitter animation
+    // base positions for jitter: we want jitter centered on the final SPHERE shape
     ;(geometry as any).userData = (geometry as any).userData || {}
-    ;(geometry as any).userData.basePositions = new Float32Array(
-      positionAttr.array as Float32Array,
-    )
+    ;(geometry as any).userData.basePositions = spherePositionsArray.slice()
 
     const material = new THREE.PointsMaterial({
       size: 0.6,
@@ -248,6 +297,11 @@ export class PointCloudSphere {
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     })
+
+    this.geometry = geometry
+    this.flatPositions = flatPositionsArray
+    this.spherePositions = spherePositionsArray
+    this.currentMorphT = 0 // start as plane
 
     return new THREE.Points(geometry, material)
   }
@@ -264,10 +318,44 @@ export class PointCloudSphere {
   }
 
   /**
+   * Morph between plane (t=0) and original sphere (t=1).
+   * We ONLY touch the position buffer; colors/sizes stay the same.
+   */
+  setMorphT(t: number) {
+    if (!this.geometry || !this.flatPositions || !this.spherePositions) return
+
+    const clamped = Math.max(0, Math.min(1, t))
+    if (Math.abs(clamped - this.currentMorphT) < 1e-4) return
+
+    const posAttr = this.geometry.getAttribute(
+      'position',
+    ) as THREE.BufferAttribute | null
+    if (!posAttr) return
+
+    const dst = posAttr.array as Float32Array
+    const f = this.flatPositions
+    const s = this.spherePositions
+    const N = dst.length
+
+    const oneMinusT = 1 - clamped
+    for (let i = 0; i < N; i++) {
+      dst[i] = f[i] * oneMinusT + s[i] * clamped
+    }
+
+    posAttr.needsUpdate = true
+    this.currentMorphT = clamped
+  }
+
+  /**
    * Micro jitter to make the planet feel alive.
    * Call from render loop: sphere.update(pointCloud, time)
+   *
+   * We only jitter once morph is basically finished, so it
+   * doesn't fight the plane→sphere interpolation.
    */
   update(pointCloud: THREE.Points, time: number) {
+    if (this.currentMorphT < 0.999) return
+
     const geometry = pointCloud.geometry as THREE.BufferGeometry
     const attr = geometry.getAttribute(
       'position',
